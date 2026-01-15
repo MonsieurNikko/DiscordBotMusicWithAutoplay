@@ -892,6 +892,7 @@ class Music(commands.Cog):
             value=(
                 "`ploop <off/track/queue>` - Chế độ lặp\n"
                 "`pautoplay <on/off>` - Bật/tắt autoplay\n"
+                "`pmode <thể loại>` - Chọn gu Autoplay (remix, lofi...)\n"
                 "`precommend` - Xem gợi ý\n"
                 "`paddrec <số>` - Thêm gợi ý vào queue"
             ),
