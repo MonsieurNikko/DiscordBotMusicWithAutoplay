@@ -96,15 +96,17 @@ class Music(commands.Cog):
         logger.info(f"[TRACK_END] Guild {guild_id}: '{track_title}' - Reason: {payload.reason}")
         
         # Only handle natural track endings - not replacements, stops, or skips
-        if payload.reason not in ("finished", "FINISHED"):
+        # Only handle natural track endings or force stops (skips)
+        # "replaced" means we played another track manually, so don't autoplay
+        if payload.reason == "replaced":
             logger.debug(f"[SKIP] Guild {guild_id}: Ignoring track end (reason: {payload.reason})")
             return
         
-        logger.info(f"[FINISHED] Guild {guild_id}: Track finished naturally, checking next action...")
+        logger.info(f"[FINISHED] Guild {guild_id}: Track finished ({payload.reason}), checking next action...")
         
-        # Handle loop modes
+        # Handle loop modes - Only on natural finish
         loop = self.get_loop_mode(guild_id)
-        if loop == "track" and payload.track:
+        if loop == "track" and payload.track and payload.reason == "finished":
             logger.info(f"[LOOP_TRACK] Guild {guild_id}: Replaying same track")
             await player.play(payload.track)
             return
@@ -116,29 +118,11 @@ class Music(commands.Cog):
             await player.play(next_track)
             return
         
-        # Wavelink AutoPlayMode.enabled handles autoplay automatically via auto_queue
-        # Check if there's a track in auto_queue (from Wavelink's recommendations)
+        # Custom Autoplay logic
         if self.get_autoplay(guild_id):
-            logger.info(f"[AUTOPLAY] Guild {guild_id}: Autoplay enabled, auto_queue has {len(player.auto_queue) if player.auto_queue else 0} tracks")
-            if player.auto_queue:
-                # Wavelink will automatically play from auto_queue
-                # Just notify the user
-                if hasattr(player, 'text_channel') and player.text_channel:
-                    next_in_auto = player.auto_queue.peek() if hasattr(player.auto_queue, 'peek') else None
-                    if next_in_auto:
-                        logger.info(f"[AUTOPLAY] Guild {guild_id}: Next recommendation: '{next_in_auto.title}'")
-                        embed = discord.Embed(
-                            title="🔄 Autoplay (YouTube Recommendation)",
-                            description=f"Tiếp theo: **{next_in_auto.title}**",
-                            color=discord.Color.purple()
-                        )
-                        await player.text_channel.send(embed=embed)
-                return
-            else:
-                # Wavelink auto_queue is empty, use our custom autoplay as fallback
-                logger.warning(f"[AUTOPLAY] Guild {guild_id}: auto_queue is empty, trying custom autoplay...")
-                await self._do_autoplay(player)
-                return
+            logger.info(f"[AUTOPLAY] Guild {guild_id}: Autoplay enabled, getting next track...")
+            await self._do_autoplay(player)
+            return
         else:
             logger.info(f"[AUTOPLAY_OFF] Guild {guild_id}: Autoplay is disabled")
         
@@ -429,11 +413,8 @@ class Music(commands.Cog):
             try:
                 player = await voice_channel.connect(cls=wavelink.Player)
                 player.text_channel = ctx.channel  # type: ignore
-                # Use Wavelink's built-in autoplay for better YouTube recommendations
-                if self.get_autoplay(ctx.guild.id):
-                    player.autoplay = wavelink.AutoPlayMode.enabled
-                else:
-                    player.autoplay = wavelink.AutoPlayMode.disabled
+                # Disable Wavelink's built-in autoplay to use our custom logic
+                player.autoplay = wavelink.AutoPlayMode.disabled
                 await player.set_volume(DEFAULT_VOLUME)
             except Exception as e:
                 return await ctx.send(f"❌ Không thể kết nối voice: {e}")
@@ -691,10 +672,10 @@ class Music(commands.Cog):
         setting = setting.lower()
         if setting == "on":
             self.autoplay_enabled[guild_id] = True
-            # Enable Wavelink's built-in autoplay for better YouTube recommendations
+            # Disable built-in, use custom
             if player:
-                player.autoplay = wavelink.AutoPlayMode.enabled
-            await ctx.send("🔄 Autoplay: **ON** (sử dụng YouTube recommendations)")
+                player.autoplay = wavelink.AutoPlayMode.disabled
+            await ctx.send("🔄 Autoplay: **ON** (Smart Recommend)")
         elif setting == "off":
             self.autoplay_enabled[guild_id] = False
             if player:
