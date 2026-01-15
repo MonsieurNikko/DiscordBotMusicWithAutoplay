@@ -17,6 +17,7 @@ from bot.config import (
     IDLE_TIMEOUT_SECONDS,
 )
 from bot.recommender import recommender, TrackInfo
+from bot.utils import extract_genre_from_text
 from bot.filters import is_valid_track, filter_search_results
 
 
@@ -173,6 +174,13 @@ class Music(commands.Cog):
         
         # 0. User defined Mode (Highest Priority)
         mode = self.autoplay_modes.get(guild_id)
+        
+        # Auto-detect genre if no manual mode set (Passive Mode)
+        if not mode:
+            mode = extract_genre_from_text(last_track.title)
+            if mode:
+                logger.info(f"[AUTOPLAY] Guild {guild_id}: Auto-detected genre '{mode}' from title")
+
         if mode:
             logger.info(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Using mode '{mode}'")
             # "remix" or "cover" often work well with title

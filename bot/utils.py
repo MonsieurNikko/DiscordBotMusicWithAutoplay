@@ -2,6 +2,7 @@
 Utility functions - logging, formatting, helpers
 """
 import logging
+import re
 from datetime import datetime
 
 
@@ -43,3 +44,34 @@ def truncate(text: str, max_length: int = 50) -> str:
     if len(text) <= max_length:
         return text
     return text[:max_length - 3] + "..."
+
+
+def extract_genre_from_text(text: str) -> str | None:
+    """
+    Attempt to extract genre/style keywords from a string (title/author).
+    Returns the first matched genre key or None.
+    """
+    if not text:
+        return None
+        
+    text_lower = text.lower()
+    
+    # Keyword map: Genre key -> List of keywords
+    genre_keywords = {
+        'remix': ['remix', 'mix', 'mashup', 'dj', 'club', 'vinahouse', 'edm'],
+        'lofi': ['lofi', 'lo-fi', 'chill', 'relax', 'study', 'beats'],
+        'acoustic': ['acoustic', 'unplugged', 'guitar', 'piano', 'cover'],
+        'nightcore': ['nightcore', 'sped up', 'speed up'],
+        'live': ['live performance', 'live at', 'concert'],
+        'rap': ['rap', 'hip hop', 'hiphop', 'freestyle'],
+        'karaoke': ['karaoke', 'instrumental', 'beat', 'off vocal']
+    }
+    
+    for genre, keywords in genre_keywords.items():
+        for kw in keywords:
+            # Check for keyword as a whole word boundary to avoid false positives
+            # e.g. "grape" shouldn't match "rap"
+            if re.search(r'\b' + re.escape(kw) + r'\b', text_lower):
+                return genre
+                
+    return None
