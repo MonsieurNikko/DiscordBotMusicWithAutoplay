@@ -170,15 +170,19 @@ class Music(commands.Cog):
         # Build search queries - prioritize artist/song name
         queries = []
         
-        # Extract artist from title (pattern: "Artist - Song")
+        # 1. High precision: Title + Author + similar
+        # "mix" keyword often triggers YouTube Mix logs which are good
+        if last_track.author:
+            queries.append(f"{last_track.title} {last_track.author} similar songs")
+            queries.append(f"{last_track.author} mix")
+        
+        # 2. Broader search
+        queries.append(f"{last_track.title} similar music")
+        
+        # 3. Artist extraction from title (fallback)
         if ' - ' in last_track.title:
             artist = last_track.title.split(' - ')[0].strip()
-            queries.append(f"{artist} music")
-            queries.append(f"{artist} songs")
-        
-        # Use channel name as artist fallback
-        if last_track.channel:
-            queries.append(f"{last_track.channel} music")
+            queries.append(f"{artist} best songs")
         
         # Add genre-based queries from recommender
         genre_queries = recommender.build_queries(guild_id, last_track.title)
