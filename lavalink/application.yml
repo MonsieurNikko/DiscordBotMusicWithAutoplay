@@ -1,0 +1,44 @@
+server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.16.0"
+      snapshot: false
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: false
+      bandcamp: false
+      soundcloud: false
+      twitch: false
+      vimeo: false
+      http: false
+      local: false
+    bufferDurationMs: 400
+    frameBufferDurationMs: 5000
+    youtubePlaylistLoadLimit: 6
+    playerUpdateInterval: 5
+    gc-warnings: true
+    opusEncodingQuality: 10
+    resamplingQuality: HIGH
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    # OAuth configuration - REQUIRED for YouTube to work!
+    # See README.md for setup instructions
+    oauth:
+      enabled: true
+      # Uncomment and add your token after setup:
+      # refreshToken: "YOUR_REFRESH_TOKEN_HERE"
+      # skipInitialization: true
+
+logging:
+  level:
+    root: INFO
+    lavalink: INFO
