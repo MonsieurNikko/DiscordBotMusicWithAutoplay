@@ -30,6 +30,10 @@ class Music(commands.Cog):
         self.loop_mode: dict[int, str] = {}  # "off", "track", "queue"
         self.last_recommendations: dict[int, list] = {}  # For paddrec
         self._idle_tasks: dict[int, asyncio.Task] = {}
+        self.next_autoplay_track: dict[int, wavelink.Playable] = {}  # Store pre-fetched track
+
+    # ... existing methods ...
+
     
     def get_autoplay(self, guild_id: int) -> bool:
         """Get autoplay status for guild (default: True)."""
@@ -156,6 +160,27 @@ class Music(commands.Cog):
             return
         
         last_track = history[-1]
+        
+        # Check if we have a pre-fetched track
+        if guild_id in self.next_autoplay_track:
+            chosen = self.next_autoplay_track.pop(guild_id)
+            logger.info(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Using pre-fetched track '{chosen.title}'")
+            try:
+                await player.play(chosen)
+                if hasattr(player, 'text_channel') and player.text_channel:
+                    embed = discord.Embed(
+                        title="🔄 Autoplay",
+                        description=f"**{chosen.title}**",
+                        color=discord.Color.purple()
+                    )
+                    await player.text_channel.send(embed=embed)
+                return
+            except Exception as e:
+                logger.error(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Error playing pre-fetched track: {e}")
+                if hasattr(player, 'text_channel') and player.text_channel:
+                    await player.text_channel.send(f"⚠️ Không thể phát bài dự kiến: **{chosen.title}**. Đang tìm bài khác...")
+                # Fallback to search if playback fails
+        
         logger.info(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Finding songs similar to '{last_track.title}'")
         
         # Build search queries - prioritize artist/song name
@@ -287,6 +312,10 @@ class Music(commands.Cog):
     
     async def _prefetch_next_autoplay(self, guild_id: int, current_track: wavelink.Playable) -> wavelink.Playable | None:
         """Pre-fetch the next autoplay track without playing it."""
+        # Clear previous prediction
+        if guild_id in self.next_autoplay_track:
+            del self.next_autoplay_track[guild_id]
+            
         try:
             # Build search queries based on current track
             queries = []
@@ -314,7 +343,10 @@ class Music(commands.Cog):
                 
                 valid = filter_search_results(results[:5], recent_ids)
                 if valid:
-                    return valid[0]  # Return first valid track
+                    found_track = valid[0]
+                    # Store found track for consistency
+                    self.next_autoplay_track[guild_id] = found_track
+                    return found_track
             
             return None
         except Exception as e:
@@ -873,6 +905,54 @@ class Music(commands.Cog):
         embed.set_footer(text="Made with ❤️ | Prefix: p")
         
         await ctx.send(embed=embed)
+
+
+    async def _prefetch_next_autoplay(self, guild_id: int, current_track: wavelink.Playable) -> wavelink.Playable | None:
+        """Pre-fetch the next autoplay track without playing it."""
+        # Clear previous prediction
+        if guild_id in self.next_autoplay_track:
+            del self.next_autoplay_track[guild_id]
+            
+        try:
+            # Build search queries based on current track
+            queries = []
+            
+            # Extract artist from title
+            if ' - ' in current_track.title:
+                artist = current_track.title.split(' - ')[0].strip()
+                queries.append(f"{artist} music")
+            
+            # Use author as fallback
+            if current_track.author:
+                queries.append(f"{current_track.author} music")
+            
+            # Add genre queries
+            genre_queries = recommender.build_queries(guild_id, current_track.title)
+            queries.extend(genre_queries[:2])
+            
+            recent_ids = recommender.get_recent_ids(guild_id)
+            
+            # Try first query only for speed
+            for query in queries[:2]:
+                results = await wavelink.Playable.search(f"ytsearch:{query}")
+                if not results:
+                    continue
+                
+                valid = filter_search_results(results[:10], recent_ids)
+                if valid:
+                    # Pick randomly from top 3 valid results for variety
+                    import random
+                    top_candidates = valid[:3]
+                    found_track = random.choice(top_candidates)
+                    
+                    # Store found track for consistency
+                    self.next_autoplay_track[guild_id] = found_track
+                    return found_track
+            
+            return None
+        except Exception as e:
+            logger.error(f"[PREFETCH] Guild {guild_id}: Error prefetching: {e}")
+            return None
 
 
 async def setup(bot: commands.Bot):
