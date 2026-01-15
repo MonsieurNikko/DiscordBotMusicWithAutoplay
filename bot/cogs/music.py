@@ -31,6 +31,7 @@ class Music(commands.Cog):
         self.last_recommendations: dict[int, list] = {}  # For paddrec
         self._idle_tasks: dict[int, asyncio.Task] = {}
         self.next_autoplay_track: dict[int, wavelink.Playable] = {}  # Store pre-fetched track
+        self.autoplay_modes: dict[int, str] = {}  # User defined genre/mode
 
     # ... existing methods ...
 
@@ -170,6 +171,17 @@ class Music(commands.Cog):
         # Build search queries - prioritize artist/song name
         queries = []
         
+        # 0. User defined Mode (Highest Priority)
+        mode = self.autoplay_modes.get(guild_id)
+        if mode:
+            logger.info(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Using mode '{mode}'")
+            # "remix" or "cover" often work well with title
+            queries.append(f"{last_track.title} {mode} version")
+            queries.append(f"{last_track.title} {mode}")
+            queries.append(f"{mode} songs similar to {last_track.title}")
+            if last_track.author:
+                queries.append(f"{last_track.author} {mode} mix")
+
         # 1. High precision: Title + Author + similar
         # "mix" keyword often triggers YouTube Mix logs which are good
         if last_track.author:
@@ -687,6 +699,16 @@ class Music(commands.Cog):
             await ctx.send("🔄 Autoplay: **OFF**")
         else:
             await ctx.send("❌ Dùng: `on`, `off`, hoặc `status`")
+
+    @commands.command(name="mode", aliases=["genre", "style"])
+    async def mode(self, ctx: commands.Context, *, style: str = None):
+        """Chọn phong cách nhạc cho Autoplay (VD: remix, lofi, acoustic)."""
+        if not style or style.lower() in ["off", "none", "clear", "reset"]:
+            self.autoplay_modes.pop(ctx.guild.id, None)
+            return await ctx.send("🔄 Autoplay Mode: **Mặc định** (Dựa theo bài hát gốc)")
+        
+        self.autoplay_modes[ctx.guild.id] = style
+        await ctx.send(f"🔄 Autoplay Mode: **{style}** (Sẽ ưu tiên tìm nhạc phong cách này)")
     
     @commands.command(name="recommend", aliases=["rec"])
     async def recommend(self, ctx: commands.Context, count: int = 5):
