@@ -13,6 +13,7 @@ from bot.config import (
     LAVALINK_HOST,
     LAVALINK_PORT,
     LAVALINK_PASSWORD,
+    LAVALINK_SSL,
 )
 
 # Setup logging
@@ -44,13 +45,14 @@ class MusicBot(commands.Bot):
     
     async def setup_hook(self) -> None:
         """Called when bot is starting up."""
-        # Connect to Lavalink
+        # Connect to Lavalink - use https if SSL enabled
+        protocol = "https" if LAVALINK_SSL else "http"
         node = wavelink.Node(
-            uri=f"http://{LAVALINK_HOST}:{LAVALINK_PORT}",
+            uri=f"{protocol}://{LAVALINK_HOST}:{LAVALINK_PORT}",
             password=LAVALINK_PASSWORD,
         )
         await wavelink.Pool.connect(nodes=[node], client=self, cache_capacity=100)
-        logger.info(f"Connected to Lavalink at {LAVALINK_HOST}:{LAVALINK_PORT}")
+        logger.info(f"Connected to Lavalink at {protocol}://{LAVALINK_HOST}:{LAVALINK_PORT}")
         
         # Load cogs
         await self.load_extension("bot.cogs.music")

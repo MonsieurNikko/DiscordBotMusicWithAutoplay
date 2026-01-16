@@ -14,6 +14,7 @@ COMMAND_PREFIX = "p"
 LAVALINK_HOST = os.getenv("LAVALINK_HOST", "localhost")
 LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", 2333))
 LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+LAVALINK_SSL = os.getenv("LAVALINK_SSL", "false").lower() == "true"
 
 # Bot Settings
 DEFAULT_VOLUME = 50
