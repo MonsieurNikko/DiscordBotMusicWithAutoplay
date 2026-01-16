@@ -204,13 +204,32 @@ class Music(commands.Cog):
                 valid_tracks = non_mv_tracks if non_mv_tracks else mv_tracks
                 
                 if valid_tracks:
-                    # Chọn ngẫu nhiên từ 5 bài đầu để tạo sự đa dạng
-                    chosen = random.choice(valid_tracks[:5])
+                    # Lấy thông tin genre/language của bài hiện tại
+                    source_info = self._detect_genre_language(
+                        current_title, 
+                        player.current.author if player.current else ""
+                    )
+                    
+                    # Tính điểm cho mỗi track và sắp xếp theo điểm giảm dần
+                    scored_tracks = []
+                    for track in valid_tracks[:10]:  # Chỉ xét 10 bài đầu
+                        score = self._calculate_similarity_score(source_info, track.title, track.author)
+                        scored_tracks.append((track, score))
+                    
+                    # Sắp xếp theo điểm giảm dần
+                    scored_tracks.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # Chọn ngẫu nhiên từ top 3 bài điểm cao nhất để vẫn có sự đa dạng
+                    top_tracks = [t[0] for t in scored_tracks[:3]]
+                    chosen = random.choice(top_tracks) if top_tracks else valid_tracks[0]
+                    
+                    # Log điểm của bài được chọn
+                    chosen_score = next((s for t, s in scored_tracks if t == chosen), 0)
+                    logger.info(f"[AUTOPLAY] Guild {guild_id}: Đã chọn từ Mix: '{chosen.title}' (score={chosen_score})")
                     
                     # Lưu vào recent_ids để tránh lặp
                     self._add_recent_id(guild_id, chosen.identifier)
                     
-                    logger.info(f"[AUTOPLAY] Guild {guild_id}: Đã chọn từ Mix: '{chosen.title}'")
                     await player.play(chosen)
                     
                     if hasattr(player, 'text_channel') and player.text_channel:
@@ -422,6 +441,82 @@ class Music(commands.Cog):
                 return True
         
         return False
+    
+    def _detect_genre_language(self, title: str, author: str = "") -> dict:
+        """
+        Phát hiện thể loại và ngôn ngữ từ title/author.
+        Trả về dict với 'genres' (set) và 'languages' (set).
+        """
+        text = f"{title} {author}".lower()
+        
+        result = {
+            'genres': set(),
+            'languages': set()
+        }
+        
+        # Phát hiện thể loại
+        genre_keywords = {
+            'pop': ['pop', 'ballad', 'acoustic'],
+            'rock': ['rock', 'metal', 'punk', 'alternative'],
+            'hiphop': ['rap', 'hip hop', 'hiphop', 'trap', 'drill'],
+            'edm': ['edm', 'remix', 'electronic', 'house', 'techno', 'trance', 'dubstep', 'dj'],
+            'rnb': ['r&b', 'rnb', 'soul', 'funk'],
+            'lofi': ['lofi', 'lo-fi', 'chill', 'study', 'relax'],
+            'classical': ['classical', 'piano', 'orchestra', 'symphony'],
+            'jazz': ['jazz', 'blues', 'swing'],
+            'country': ['country', 'folk', 'acoustic'],
+            'kpop': ['kpop', 'k-pop', 'bts', 'blackpink', 'twice', 'exo', 'nct'],
+            'vpop': ['vpop', 'v-pop'],
+            'anime': ['anime', 'ost', 'opening', 'ending', 'naruto', 'one piece'],
+        }
+        
+        for genre, keywords in genre_keywords.items():
+            for kw in keywords:
+                if kw in text:
+                    result['genres'].add(genre)
+                    break
+        
+        # Phát hiện ngôn ngữ (dựa trên ký tự và keywords)
+        # Tiếng Việt
+        vietnamese_chars = 'àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ'
+        vietnamese_keywords = ['việt', 'viet', 'nha', 'nhac', 'bai', 'hat', 'vietsub']
+        if any(c in text for c in vietnamese_chars) or any(kw in text for kw in vietnamese_keywords):
+            result['languages'].add('vi')
+        
+        # Tiếng Hàn
+        korean_keywords = ['한국', 'korea', 'korean', 'kpop', 'k-pop', 'hangul']
+        if any(kw in text for kw in korean_keywords) or any('\uac00' <= c <= '\ud7a3' for c in text):
+            result['languages'].add('ko')
+        
+        # Tiếng Nhật
+        japanese_keywords = ['日本', 'japan', 'japanese', 'anime', 'jpop', 'j-pop']
+        if any(kw in text for kw in japanese_keywords) or any('\u3040' <= c <= '\u30ff' for c in text):
+            result['languages'].add('ja')
+        
+        # Tiếng Anh (mặc định nếu có chữ Latin và không có ngôn ngữ khác)
+        english_keywords = ['english', 'eng', 'lyrics']
+        if any(kw in text for kw in english_keywords) or (not result['languages'] and any(c.isalpha() for c in text)):
+            result['languages'].add('en')
+        
+        return result
+    
+    def _calculate_similarity_score(self, source_info: dict, track_title: str, track_author: str = "") -> int:
+        """
+        Tính điểm tương đồng giữa bài nguồn và bài candidate.
+        Điểm cao hơn = ưu tiên hơn.
+        """
+        target_info = self._detect_genre_language(track_title, track_author)
+        score = 0
+        
+        # Cùng thể loại: +3 điểm mỗi thể loại chung
+        common_genres = source_info['genres'] & target_info['genres']
+        score += len(common_genres) * 3
+        
+        # Cùng ngôn ngữ: +2 điểm mỗi ngôn ngữ chung
+        common_languages = source_info['languages'] & target_info['languages']
+        score += len(common_languages) * 2
+        
+        return score
     
     def _start_idle_timer(self, player: wavelink.Player):
         """Start idle disconnect timer."""
