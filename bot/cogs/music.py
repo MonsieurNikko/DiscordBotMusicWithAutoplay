@@ -16,9 +16,7 @@ from bot.config import (
     MAX_DURATION_SECONDS,
     IDLE_TIMEOUT_SECONDS,
 )
-from bot.recommender import recommender, TrackInfo
-from bot.utils import extract_genre_from_text
-from bot.filters import is_valid_track, filter_search_results
+from bot.filters import is_valid_track, filter_search_results, is_likely_mv
 
 
 class Music(commands.Cog):
@@ -29,10 +27,9 @@ class Music(commands.Cog):
         # Per-guild state
         self.autoplay_enabled: dict[int, bool] = {}  # Default: True
         self.loop_mode: dict[int, str] = {}  # "off", "track", "queue"
-        self.last_recommendations: dict[int, list] = {}  # For paddrec
         self._idle_tasks: dict[int, asyncio.Task] = {}
-        self.next_autoplay_track: dict[int, wavelink.Playable] = {}  # Store pre-fetched track
-        self.autoplay_modes: dict[int, str] = {}  # User defined genre/mode
+        self._recent_ids: dict[int, list[str]] = {}  # Tránh lặp bài
+        self._next_autoplay: dict[int, wavelink.Playable] = {}  # Bài autoplay đã prefetch
 
     # ... existing methods ...
 
@@ -61,14 +58,8 @@ class Music(commands.Cog):
         # Log track start
         logger.info(f"[PLAYING] Guild {guild_id}: '{track.title}' by {track.author} ({track.length // 1000}s)")
         
-        # Record to recommender for learning
-        track_info = TrackInfo(
-            video_id=track.identifier,
-            title=track.title,
-            channel=track.author,
-            duration_ms=track.length
-        )
-        recommender.learn(guild_id, track_info)
+        # Lưu video_id để tránh lặp khi autoplay
+        self._add_recent_id(guild_id, track.identifier)
         
         # Send now playing message
         if hasattr(player, 'text_channel') and player.text_channel:
@@ -79,9 +70,9 @@ class Music(commands.Cog):
         if guild_id in self._idle_tasks:
             self._idle_tasks[guild_id].cancel()
         
-        # If this is the last song in queue and autoplay is on, show what's next
+        # Nếu đây là bài cuối trong queue và autoplay ON, prefetch và hiển thị bài tiếp theo
         if not player.queue and self.get_autoplay(guild_id):
-            await self._show_last_song_notice(player, track)
+            await self._prefetch_and_notify(player, track)
     
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
@@ -133,123 +124,125 @@ class Music(commands.Cog):
         self._start_idle_timer(player)
     
     async def _do_autoplay(self, player: wavelink.Player):
-        """Find and play next track based on recommendations."""
+        """Lấy bài tiếp theo từ YouTube Radio Mix hoặc dùng bài đã prefetch."""
         if not player.guild:
             return
         
         guild_id = player.guild.id
         
-        # Get last played track for seed
-        history = recommender._guild_history.get(guild_id, [])
-        if not history:
-            logger.warning(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: No history, cannot recommend")
-            return
-        
-        last_track = history[-1]
-        
-        # Check if we have a pre-fetched track
-        if guild_id in self.next_autoplay_track:
-            chosen = self.next_autoplay_track.pop(guild_id)
-            logger.info(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Using pre-fetched track '{chosen.title}'")
+        # Kiểm tra nếu đã có bài prefetch
+        if guild_id in self._next_autoplay:
+            chosen = self._next_autoplay.pop(guild_id)
+            logger.info(f"[AUTOPLAY] Guild {guild_id}: Dùng bài đã prefetch: '{chosen.title}'")
+            
             try:
+                self._add_recent_id(guild_id, chosen.identifier)
                 await player.play(chosen)
+                
                 if hasattr(player, 'text_channel') and player.text_channel:
                     embed = discord.Embed(
                         title="🔄 Autoplay",
                         description=f"**{chosen.title}**",
                         color=discord.Color.purple()
                     )
+                    embed.add_field(name="Channel", value=chosen.author, inline=True)
                     await player.text_channel.send(embed=embed)
                 return
             except Exception as e:
-                logger.error(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Error playing pre-fetched track: {e}")
-                if hasattr(player, 'text_channel') and player.text_channel:
-                    await player.text_channel.send(f"⚠️ Không thể phát bài dự kiến: **{chosen.title}**. Đang tìm bài khác...")
-                # Fallback to search if playback fails
+                logger.error(f"[AUTOPLAY] Guild {guild_id}: Lỗi phát bài prefetch: {e}")
+                # Fallback sang search mới
         
-        logger.info(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Finding songs similar to '{last_track.title}'")
+        # Không có prefetch hoặc prefetch fail, search mới
+        if not player.current:
+            logger.warning(f"[AUTOPLAY] Guild {guild_id}: Không có bài hiện tại để tìm gợi ý")
+            self._start_idle_timer(player)
+            return
+            
+        video_id = player.current.identifier
+        current_title = player.current.title
         
-        # Build search queries - prioritize artist/song name
-        queries = []
+        logger.info(f"[AUTOPLAY] Guild {guild_id}: Tìm bài tiếp theo cho '{current_title}'")
         
-        # 0. User defined Mode (Highest Priority)
-        mode = self.autoplay_modes.get(guild_id)
+        # Lấy danh sách bài đã phát gần đây
+        recent_ids = set(self._recent_ids.get(guild_id, []))
+        recent_ids.add(video_id)  # Thêm bài hiện tại
         
-        # Auto-detect genre if no manual mode set (Passive Mode)
-        if not mode:
-            mode = extract_genre_from_text(last_track.title)
-            if mode:
-                logger.info(f"[AUTOPLAY] Guild {guild_id}: Auto-detected genre '{mode}' from title")
-
-        if mode:
-            logger.info(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Using mode '{mode}'")
-            # "remix" or "cover" often work well with title
-            queries.append(f"{last_track.title} {mode} version")
-            queries.append(f"{last_track.title} {mode}")
-            queries.append(f"{mode} songs similar to {last_track.title}")
-            if last_track.author:
-                queries.append(f"{last_track.author} {mode} mix")
-
-        # 1. High precision: Title + Author + similar
-        # "mix" keyword often triggers YouTube Mix logs which are good
-        if last_track.author:
-            queries.append(f"{last_track.title} {last_track.author} similar songs")
-            queries.append(f"{last_track.author} mix")
+        # Thử YouTube Radio Mix trước
+        try:
+            # YouTube Radio Mix URL
+            mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+            logger.info(f"[AUTOPLAY] Guild {guild_id}: Đang load YouTube Mix...")
+            
+            results = await wavelink.Playable.search(mix_url)
+            
+            if results and len(results) > 1:
+                # Lọc bỏ bài hiện tại và các bài đã phát
+                non_mv_tracks = []  # Ưu tiên
+                mv_tracks = []      # Fallback
+                
+                for track in results[1:]:  # Bỏ bài đầu (bài hiện tại)
+                    if track.identifier not in recent_ids:
+                        # Kiểm tra filter (shorts, live, quá dài)
+                        is_valid, _ = is_valid_track(
+                            title=track.title,
+                            duration_ms=track.length,
+                            is_stream=track.is_stream
+                        )
+                        if is_valid:
+                            # Phân loại: MV hay không
+                            if is_likely_mv(track.title):
+                                mv_tracks.append(track)
+                            else:
+                                non_mv_tracks.append(track)
+                
+                # Ưu tiên bài không phải MV, nếu không có thì dùng MV
+                valid_tracks = non_mv_tracks if non_mv_tracks else mv_tracks
+                
+                if valid_tracks:
+                    # Chọn ngẫu nhiên từ 5 bài đầu để tạo sự đa dạng
+                    chosen = random.choice(valid_tracks[:5])
+                    
+                    # Lưu vào recent_ids để tránh lặp
+                    self._add_recent_id(guild_id, chosen.identifier)
+                    
+                    logger.info(f"[AUTOPLAY] Guild {guild_id}: Đã chọn từ Mix: '{chosen.title}'")
+                    await player.play(chosen)
+                    
+                    if hasattr(player, 'text_channel') and player.text_channel:
+                        embed = discord.Embed(
+                            title="🔄 Autoplay (YouTube Mix)",
+                            description=f"**{chosen.title}**",
+                            color=discord.Color.purple()
+                        )
+                        embed.add_field(name="Channel", value=chosen.author, inline=True)
+                        await player.text_channel.send(embed=embed)
+                    return
+                    
+        except Exception as e:
+            logger.warning(f"[AUTOPLAY] Guild {guild_id}: YouTube Mix thất bại: {e}")
         
-        # 2. Broader search
-        queries.append(f"{last_track.title} similar music")
+        # Fallback: Tìm kiếm thông thường
+        logger.info(f"[AUTOPLAY] Guild {guild_id}: Fallback sang search...")
         
-        # 3. Artist extraction from title (fallback)
-        if ' - ' in last_track.title:
-            artist = last_track.title.split(' - ')[0].strip()
-            queries.append(f"{artist} best songs")
+        fallback_queries = [
+            f"{current_title} similar songs",
+            f"{player.current.author} music" if player.current.author else None,
+        ]
+        fallback_queries = [q for q in fallback_queries if q]
         
-        # Add genre-based queries from recommender
-        genre_queries = recommender.build_queries(guild_id, last_track.title)
-        queries.extend(genre_queries)
-        
-        # Limit to 5 queries
-        queries = queries[:5]
-        logger.info(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Search queries: {queries}")
-        
-        recent_ids = recommender.get_recent_ids(guild_id)
-        
-        # Try each query
-        for query in queries:
+        for query in fallback_queries:
             try:
-                logger.debug(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Searching '{query}'")
                 results = await wavelink.Playable.search(f"ytsearch:{query}")
                 if not results:
-                    logger.debug(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: No results for '{query}'")
                     continue
                 
-                logger.debug(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Got {len(results)} results")
-                
-                # Filter results
+                # Lọc kết quả
                 valid = filter_search_results(results[:10], recent_ids)
-                if not valid:
-                    logger.debug(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: All results filtered out")
-                    continue
-                
-                # Score and pick
-                scored = []
-                for track in valid:
-                    score = recommender.score_candidate(
-                        guild_id, 
-                        track.title, 
-                        track.author
-                    )
-                    scored.append((track, score))
-                
-                # Sort by score, pick from top 3 with weighted random
-                scored.sort(key=lambda x: x[1], reverse=True)
-                top = scored[:3]
-                
-                if top:
-                    weights = [max(s[1], 1) for s in top]
-                    chosen = random.choices(top, weights=weights, k=1)[0][0]
+                if valid:
+                    chosen = random.choice(valid[:3])
+                    self._add_recent_id(guild_id, chosen.identifier)
                     
-                    logger.info(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Selected '{chosen.title}' from query '{query}'")
+                    logger.info(f"[AUTOPLAY] Guild {guild_id}: Đã chọn từ search: '{chosen.title}'")
                     await player.play(chosen)
                     
                     if hasattr(player, 'text_channel') and player.text_channel:
@@ -260,106 +253,118 @@ class Music(commands.Cog):
                         )
                         await player.text_channel.send(embed=embed)
                     return
-                
+                    
             except Exception as e:
-                logger.error(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: Error searching '{query}': {e}")
+                logger.error(f"[AUTOPLAY] Guild {guild_id}: Search thất bại: {e}")
                 continue
         
-        # Failed to find next track
-        logger.warning(f"[CUSTOM_AUTOPLAY] Guild {guild_id}: All queries failed, no track found")
+        # Không tìm được bài nào
+        logger.warning(f"[AUTOPLAY] Guild {guild_id}: Không tìm được bài tiếp theo")
         if hasattr(player, 'text_channel') and player.text_channel:
             await player.text_channel.send("🔇 Autoplay: Không tìm được bài phù hợp.")
         
         self._start_idle_timer(player)
     
-    async def _show_last_song_notice(self, player: wavelink.Player, current_track: wavelink.Playable):
-        """Show notice when playing the last song in queue, with autoplay preview."""
+    async def _prefetch_and_notify(self, player: wavelink.Player, current_track: wavelink.Playable):
+        """Prefetch bài autoplay tiếp theo và thông báo cho user."""
         if not player.guild:
             return
         
         guild_id = player.guild.id
+        video_id = current_track.identifier
+        
+        logger.info(f"[PREFETCH] Guild {guild_id}: Đang prefetch bài tiếp theo...")
+        
+        # Lấy danh sách bài đã phát gần đây
+        recent_ids = set(self._recent_ids.get(guild_id, []))
+        recent_ids.add(video_id)
         
         try:
-            # Get the next autoplay track - try auto_queue first
-            next_track = None
+            # YouTube Radio Mix URL
+            mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+            results = await wavelink.Playable.search(mix_url)
             
-            if player.auto_queue:
-                next_track = player.auto_queue.peek() if hasattr(player.auto_queue, 'peek') else None
-            
-            # If auto_queue is empty, pre-fetch using our custom search
-            if not next_track:
-                next_track = await self._prefetch_next_autoplay(guild_id, current_track)
-            
-            if hasattr(player, 'text_channel') and player.text_channel:
-                if next_track:
-                    embed = discord.Embed(
-                        title="🎵 Bài cuối trong Queue",
-                        description=(
-                            f"Đang phát bài cuối: **{current_track.title}**\n\n"
-                            f"⏭️ **Autoplay tiếp theo:** {next_track.title}"
-                        ),
-                        color=discord.Color.orange()
-                    )
-                    if hasattr(next_track, 'thumb') and next_track.thumb:
-                        embed.set_thumbnail(url=next_track.thumb)
-                else:
-                    embed = discord.Embed(
-                        title="🎵 Bài cuối trong Queue",
-                        description=(
-                            f"Đang phát bài cuối: **{current_track.title}**\n\n"
-                            f"⏭️ **Autoplay** đang bật - sẽ tự tìm bài khi hết."
-                        ),
-                        color=discord.Color.orange()
-                    )
+            if results and len(results) > 1:
+                # Lọc bỏ bài hiện tại và các bài đã phát
+                non_mv_tracks = []  # Ưu tiên
+                mv_tracks = []      # Fallback
                 
-                await player.text_channel.send(embed=embed)
-                logger.info(f"[LAST_SONG] Guild {guild_id}: Playing last song, next autoplay: '{next_track.title if next_track else 'TBD'}'")
+                for track in results[1:]:
+                    if track.identifier not in recent_ids:
+                        is_valid, _ = is_valid_track(
+                            title=track.title,
+                            duration_ms=track.length,
+                            is_stream=track.is_stream
+                        )
+                        if is_valid:
+                            if is_likely_mv(track.title):
+                                mv_tracks.append(track)
+                            else:
+                                non_mv_tracks.append(track)
                 
-        except Exception as e:
-            logger.error(f"[LAST_SONG] Guild {guild_id}: Error showing last song notice: {e}")
-    
-    async def _prefetch_next_autoplay(self, guild_id: int, current_track: wavelink.Playable) -> wavelink.Playable | None:
-        """Pre-fetch the next autoplay track without playing it."""
-        # Clear previous prediction
-        if guild_id in self.next_autoplay_track:
-            del self.next_autoplay_track[guild_id]
-            
-        try:
-            # Build search queries based on current track
-            queries = []
-            
-            # Extract artist from title
-            if ' - ' in current_track.title:
-                artist = current_track.title.split(' - ')[0].strip()
-                queries.append(f"{artist} music")
-            
-            # Use author as fallback
-            if current_track.author:
-                queries.append(f"{current_track.author} music")
-            
-            # Add genre queries
-            genre_queries = recommender.build_queries(guild_id, current_track.title)
-            queries.extend(genre_queries[:2])
-            
-            recent_ids = recommender.get_recent_ids(guild_id)
-            
-            # Try first query only for speed
-            for query in queries[:2]:
-                results = await wavelink.Playable.search(f"ytsearch:{query}")
-                if not results:
-                    continue
+                # Ưu tiên bài không phải MV
+                valid_tracks = non_mv_tracks if non_mv_tracks else mv_tracks
                 
-                valid = filter_search_results(results[:5], recent_ids)
+                if valid_tracks:
+                    # Chọn ngẫu nhiên từ 5 bài đầu
+                    chosen = random.choice(valid_tracks[:5])
+                    self._next_autoplay[guild_id] = chosen
+                    
+                    logger.info(f"[PREFETCH] Guild {guild_id}: Đã prefetch: '{chosen.title}'")
+                    
+                    # Thông báo bài tiếp theo
+                    if hasattr(player, 'text_channel') and player.text_channel:
+                        embed = discord.Embed(
+                            title="🎵 Bài cuối trong Queue",
+                            description=(
+                                f"Đang phát: **{current_track.title}**\n\n"
+                                f"⏭️ **Tiếp theo (Autoplay):** {chosen.title}"
+                            ),
+                            color=discord.Color.orange()
+                        )
+                        if chosen.artwork:
+                            embed.set_thumbnail(url=chosen.artwork)
+                        await player.text_channel.send(embed=embed)
+                    return
+            
+            # Fallback: search
+            query = f"{current_track.title} similar songs"
+            results = await wavelink.Playable.search(f"ytsearch:{query}")
+            if results:
+                valid = filter_search_results(results[:10], recent_ids)
                 if valid:
-                    found_track = valid[0]
-                    # Store found track for consistency
-                    self.next_autoplay_track[guild_id] = found_track
-                    return found_track
-            
-            return None
+                    chosen = random.choice(valid[:3])
+                    self._next_autoplay[guild_id] = chosen
+                    
+                    logger.info(f"[PREFETCH] Guild {guild_id}: Đã prefetch (search): '{chosen.title}'")
+                    
+                    if hasattr(player, 'text_channel') and player.text_channel:
+                        embed = discord.Embed(
+                            title="🎵 Bài cuối trong Queue",
+                            description=(
+                                f"Đang phát: **{current_track.title}**\n\n"
+                                f"⏭️ **Tiếp theo (Autoplay):** {chosen.title}"
+                            ),
+                            color=discord.Color.orange()
+                        )
+                        await player.text_channel.send(embed=embed)
+                    return
+                    
         except Exception as e:
-            logger.error(f"[PREFETCH] Guild {guild_id}: Error prefetching: {e}")
-            return None
+            logger.error(f"[PREFETCH] Guild {guild_id}: Lỗi: {e}")
+        
+        # Không prefetch được
+        logger.warning(f"[PREFETCH] Guild {guild_id}: Không tìm được bài để prefetch")
+    
+    def _add_recent_id(self, guild_id: int, video_id: str):
+        """Thêm video_id vào danh sách đã phát để tránh lặp."""
+        if guild_id not in self._recent_ids:
+            self._recent_ids[guild_id] = []
+        
+        self._recent_ids[guild_id].append(video_id)
+        # Giữ tối đa 20 bài gần nhất
+        if len(self._recent_ids[guild_id]) > 20:
+            self._recent_ids[guild_id].pop(0)
     
     def _start_idle_timer(self, player: wavelink.Player):
         """Start idle disconnect timer."""
@@ -454,32 +459,93 @@ class Music(commands.Cog):
             if not tracks:
                 return await ctx.send("❌ Không tìm thấy kết quả. Thử từ khóa khác?")
             
-            track = tracks[0]
+            # Xử lý playlist (nhiều tracks) vs single track
+            if isinstance(tracks, wavelink.Playlist):
+                # Đây là playlist - load toàn bộ
+                playlist_name = tracks.name or "Unknown Playlist"
+                playlist_tracks = list(tracks.tracks)
+                
+                if not playlist_tracks:
+                    return await ctx.send("❌ Playlist trống hoặc không thể load.")
+                
+                # Validate và filter tracks
+                valid_tracks = []
+                for track in playlist_tracks:
+                    is_valid, _ = is_valid_track(
+                        title=track.title,
+                        duration_ms=track.length,
+                        is_stream=track.is_stream
+                    )
+                    if is_valid:
+                        valid_tracks.append(track)
+                
+                if not valid_tracks:
+                    return await ctx.send("❌ Không có bài nào trong playlist phù hợp (có thể quá dài hoặc bị chặn).")
+                
+                # Tính tổng thời gian
+                total_duration = sum(track.length for track in valid_tracks)
+                total_duration_str = self._format_duration(total_duration)
+                
+                # Add tracks to queue
+                if player.playing:
+                    for track in valid_tracks:
+                        player.queue.put(track)
+                    
+                    embed = discord.Embed(
+                        title="📋 Đã thêm Playlist vào queue",
+                        description=f"**{playlist_name}**",
+                        color=discord.Color.blue()
+                    )
+                    embed.add_field(name="Số bài", value=f"{len(valid_tracks)} bài", inline=True)
+                    embed.add_field(name="Tổng thời gian", value=total_duration_str, inline=True)
+                    embed.add_field(name="Bỏ qua", value=f"{len(playlist_tracks) - len(valid_tracks)} bài", inline=True)
+                    await ctx.send(embed=embed)
+                else:
+                    # Play first track, add rest to queue
+                    first_track = valid_tracks[0]
+                    for track in valid_tracks[1:]:
+                        player.queue.put(track)
+                    
+                    await player.play(first_track)
+                    
+                    if len(valid_tracks) > 1:
+                        embed = discord.Embed(
+                            title="📋 Đang phát Playlist",
+                            description=f"**{playlist_name}**",
+                            color=discord.Color.green()
+                        )
+                        embed.add_field(name="Số bài", value=f"{len(valid_tracks)} bài", inline=True)
+                        embed.add_field(name="Tổng thời gian", value=total_duration_str, inline=True)
+                        await ctx.send(embed=embed)
             
-            # Validate track
-            is_valid, reason = is_valid_track(
-                title=track.title,
-                duration_ms=track.length,
-                is_stream=track.is_stream
-            )
-            
-            if not is_valid:
-                return await ctx.send(reason)
-            
-            # Add to queue or play
-            if player.playing:
-                player.queue.put(track)
-                position = len(player.queue)
-                embed = discord.Embed(
-                    title="📝 Đã thêm vào queue",
-                    description=f"**{track.title}**",
-                    color=discord.Color.blue()
-                )
-                embed.add_field(name="Vị trí", value=f"#{position}", inline=True)
-                embed.add_field(name="Thời lượng", value=self._format_duration(track.length), inline=True)
-                await ctx.send(embed=embed)
             else:
-                await player.play(track)
+                # Single track (hoặc list with 1 track)
+                track = tracks[0] if isinstance(tracks, list) else tracks
+                
+                # Validate track
+                is_valid, reason = is_valid_track(
+                    title=track.title,
+                    duration_ms=track.length,
+                    is_stream=track.is_stream
+                )
+                
+                if not is_valid:
+                    return await ctx.send(reason)
+                
+                # Add to queue or play
+                if player.playing:
+                    player.queue.put(track)
+                    position = len(player.queue)
+                    embed = discord.Embed(
+                        title="📝 Đã thêm vào queue",
+                        description=f"**{track.title}**",
+                        color=discord.Color.blue()
+                    )
+                    embed.add_field(name="Vị trí", value=f"#{position}", inline=True)
+                    embed.add_field(name="Thời lượng", value=self._format_duration(track.length), inline=True)
+                    await ctx.send(embed=embed)
+                else:
+                    await player.play(track)
             
         except Exception as e:
             await ctx.send(f"❌ Lỗi khi tìm bài: {e}")
@@ -535,7 +601,9 @@ class Music(commands.Cog):
         
         # Clear guild state
         if ctx.guild:
-            recommender.clear_guild(ctx.guild.id)
+            guild_id = ctx.guild.id
+            self._recent_ids.pop(guild_id, None)
+            self._next_autoplay.pop(guild_id, None)
         
         await ctx.send("⏹️ Đã dừng và rời voice")
     
@@ -630,6 +698,45 @@ class Music(commands.Cog):
         
         await ctx.send(f"🔀 Đã trộn {len(queue_list)} bài")
     
+    @commands.command(name="jump", aliases=["j", "skipto"])
+    async def jump(self, ctx: commands.Context, index: int):
+        """Nhảy đến bài ở vị trí chỉ định trong queue."""
+        player: wavelink.Player = ctx.voice_client  # type: ignore
+        
+        if not player or not player.queue:
+            return await ctx.send("❌ Queue trống.")
+        
+        if index < 1 or index > len(player.queue):
+            return await ctx.send(f"❌ Index không hợp lệ. Chọn từ 1-{len(player.queue)}")
+        
+        # Lấy danh sách queue hiện tại
+        queue_list = list(player.queue)
+        
+        # Bài muốn nhảy đến
+        target_track = queue_list[index - 1]
+        
+        # Xóa tất cả bài từ đầu đến trước bài đích
+        skipped_count = index - 1
+        remaining_tracks = queue_list[index:]  # Bao gồm bài đích ở vị trí 0
+        
+        # Rebuild queue với các bài còn lại (không bao gồm bài đích vì sẽ phát ngay)
+        player.queue.clear()
+        for track in remaining_tracks[1:]:  # Bỏ bài đích
+            player.queue.put(track)
+        
+        # Phát bài đích
+        await player.play(target_track)
+        
+        embed = discord.Embed(
+            title="⏭️ Nhảy đến bài",
+            description=f"**{target_track.title}**",
+            color=discord.Color.orange()
+        )
+        if skipped_count > 0:
+            embed.add_field(name="Đã bỏ qua", value=f"{skipped_count} bài", inline=True)
+        embed.add_field(name="Còn lại", value=f"{len(remaining_tracks) - 1} bài", inline=True)
+        await ctx.send(embed=embed)
+    
     @commands.command(name="nowplaying", aliases=["np"])
     async def nowplaying(self, ctx: commands.Context):
         """Hiển thị bài đang phát với progress bar."""
@@ -708,112 +815,7 @@ class Music(commands.Cog):
         else:
             await ctx.send("❌ Dùng: `on`, `off`, hoặc `status`")
 
-    @commands.command(name="mode", aliases=["genre", "style"])
-    async def mode(self, ctx: commands.Context, *, style: str = None):
-        """Chọn phong cách nhạc cho Autoplay (VD: remix, lofi, acoustic)."""
-        if not style or style.lower() in ["off", "none", "clear", "reset"]:
-            self.autoplay_modes.pop(ctx.guild.id, None)
-            return await ctx.send("🔄 Autoplay Mode: **Mặc định** (Dựa theo bài hát gốc)")
-        
-        self.autoplay_modes[ctx.guild.id] = style
-        await ctx.send(f"🔄 Autoplay Mode: **{style}** (Sẽ ưu tiên tìm nhạc phong cách này)")
-    
-    @commands.command(name="recommend", aliases=["rec"])
-    async def recommend(self, ctx: commands.Context, count: int = 5):
-        """Xem danh sách gợi ý dựa trên bài đang/vừa phát."""
-        player: wavelink.Player = ctx.voice_client  # type: ignore
-        
-        if not ctx.guild:
-            return
-        
-        guild_id = ctx.guild.id
-        count = min(max(count, 1), 10)  # Clamp 1-10
-        
-        # Get seed from current or history
-        seed_title = None
-        if player and player.current:
-            seed_title = player.current.title
-        else:
-            history = recommender._guild_history.get(guild_id, [])
-            if history:
-                seed_title = history[-1].title
-        
-        if not seed_title:
-            return await ctx.send("❌ Chưa có bài nào được phát để gợi ý.")
-        
-        # Get recommendations
-        queries = recommender.build_queries(guild_id, seed_title)
-        recent_ids = recommender.get_recent_ids(guild_id)
-        
-        recommendations = []
-        for query in queries:
-            try:
-                results = await wavelink.Playable.search(f"ytsearch:{query}")
-                if results:
-                    valid = filter_search_results(results[:5], recent_ids)
-                    for track in valid:
-                        if track.identifier not in [r.identifier for r in recommendations]:
-                            recommendations.append(track)
-                            if len(recommendations) >= count:
-                                break
-            except Exception:
-                continue
-            
-            if len(recommendations) >= count:
-                break
-        
-        if not recommendations:
-            return await ctx.send("❌ Không tìm được gợi ý phù hợp.")
-        
-        # Store for paddrec
-        self.last_recommendations[guild_id] = recommendations
-        
-        # Build response
-        embed = discord.Embed(title="💡 Gợi ý cho bạn", color=discord.Color.gold())
-        description = ""
-        for i, track in enumerate(recommendations, 1):
-            duration = self._format_duration(track.length)
-            description += f"`{i}.` **{track.title}** - {duration}\n"
-        
-        embed.description = description
-        embed.set_footer(text="Dùng paddrec <số> để thêm vào queue")
-        
-        await ctx.send(embed=embed)
-    
-    @commands.command(name="addrec")
-    async def addrec(self, ctx: commands.Context, index: int):
-        """Thêm bài từ danh sách gợi ý vào queue."""
-        if not ctx.guild:
-            return
-        
-        guild_id = ctx.guild.id
-        
-        recommendations = self.last_recommendations.get(guild_id, [])
-        if not recommendations:
-            return await ctx.send("❌ Chưa chạy `precommend`. Hãy chạy trước!")
-        
-        if index < 1 or index > len(recommendations):
-            return await ctx.send(f"❌ Chọn số từ 1-{len(recommendations)}")
-        
-        track = recommendations[index - 1]
-        
-        player: wavelink.Player = ctx.voice_client  # type: ignore
-        
-        if not player:
-            # Check if user is in voice
-            if not ctx.author.voice:
-                return await ctx.send("❌ Bạn phải vào voice channel!")
-            
-            player = await ctx.author.voice.channel.connect(cls=wavelink.Player)
-            player.text_channel = ctx.channel  # type: ignore
-            await player.set_volume(DEFAULT_VOLUME)
-        
-        if player.playing:
-            player.queue.put(track)
-            await ctx.send(f"📝 Đã thêm: **{track.title}**")
-        else:
-            await player.play(track)
-    
+
     @commands.command(name="settings")
     async def settings(self, ctx: commands.Context):
         """Xem cấu hình hiện tại."""
@@ -899,10 +901,7 @@ class Music(commands.Cog):
             name="🔄 **Lặp & Autoplay**",
             value=(
                 "`ploop <off/track/queue>` - Chế độ lặp\n"
-                "`pautoplay <on/off>` - Bật/tắt autoplay\n"
-                "`pmode <thể loại>` - Chọn gu Autoplay (remix, lofi...)\n"
-                "`precommend` - Xem gợi ý\n"
-                "`paddrec <số>` - Thêm gợi ý vào queue"
+                "`pautoplay <on/off>` - Bật/tắt autoplay"
             ),
             inline=True
         )
@@ -912,8 +911,8 @@ class Music(commands.Cog):
             name="💡 **Mẹo**",
             value=(
                 "• Autoplay sẽ tự tìm bài tiếp theo khi queue trống\n"
-                "• Bot học từ bài bạn nghe để gợi ý chính xác hơn\n"
-                "• Dùng URL YouTube để phát bài cụ thể"
+                "• Sử dụng thuật toán YouTube Mix để gợi ý\n"
+                "• Bot tự rời khi không còn ai trong voice"
             ),
             inline=False
         )
@@ -921,55 +920,51 @@ class Music(commands.Cog):
         embed.set_footer(text="Made with ❤️ | Prefix: p")
         
         await ctx.send(embed=embed)
-
-
-    async def _prefetch_next_autoplay(self, guild_id: int, current_track: wavelink.Playable) -> wavelink.Playable | None:
-        """Pre-fetch the next autoplay track without playing it."""
-        # Clear previous prediction
-        if guild_id in self.next_autoplay_track:
-            del self.next_autoplay_track[guild_id]
+    
+    # ==================== VOICE STATE EVENTS ====================
+    
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        """Tự động rời voice khi không còn ai (trừ bot)."""
+        # Chỉ xử lý khi ai đó rời voice channel
+        if before.channel is None:
+            return
+        
+        # Kiểm tra nếu channel cũ có bot trong đó
+        guild = before.channel.guild
+        player: wavelink.Player = guild.voice_client  # type: ignore
+        
+        if not player or not player.channel:
+            return
+        
+        # Kiểm tra nếu đây là channel mà bot đang ở
+        if player.channel.id != before.channel.id:
+            return
+        
+        # Đếm số người thật trong channel (không tính bot)
+        human_members = [m for m in before.channel.members if not m.bot]
+        
+        if len(human_members) == 0:
+            logger.info(f"[ALONE] Guild {guild.id}: Không còn ai trong voice, rời sau 30s...")
             
-        try:
-            # Build search queries based on current track
-            queries = []
+            # Đợi 30 giây trước khi rời (trong trường hợp ai đó quay lại)
+            await asyncio.sleep(30)
             
-            # Extract artist from title
-            if ' - ' in current_track.title:
-                artist = current_track.title.split(' - ')[0].strip()
-                queries.append(f"{artist} music")
-            
-            # Use author as fallback
-            if current_track.author:
-                queries.append(f"{current_track.author} music")
-            
-            # Add genre queries
-            genre_queries = recommender.build_queries(guild_id, current_track.title)
-            queries.extend(genre_queries[:2])
-            
-            recent_ids = recommender.get_recent_ids(guild_id)
-            
-            # Try first query only for speed
-            for query in queries[:2]:
-                results = await wavelink.Playable.search(f"ytsearch:{query}")
-                if not results:
-                    continue
-                
-                valid = filter_search_results(results[:10], recent_ids)
-                if valid:
-                    # Pick randomly from top 3 valid results for variety
-                    import random
-                    top_candidates = valid[:3]
-                    found_track = random.choice(top_candidates)
+            # Kiểm tra lại sau 30s
+            if player.channel:
+                current_members = [m for m in player.channel.members if not m.bot]
+                if len(current_members) == 0 and player.connected:
+                    player.queue.clear()
+                    if player.playing:
+                        await player.stop()
+                    await player.disconnect()
                     
-                    # Store found track for consistency
-                    self.next_autoplay_track[guild_id] = found_track
-                    return found_track
-            
-            return None
-        except Exception as e:
-            logger.error(f"[PREFETCH] Guild {guild_id}: Error prefetching: {e}")
-            return None
+                    if hasattr(player, 'text_channel') and player.text_channel:
+                        await player.text_channel.send("👋 Rời voice vì không còn ai nghe.")
+                    
+                    logger.info(f"[ALONE] Guild {guild.id}: Đã rời voice")
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Music(bot))
+

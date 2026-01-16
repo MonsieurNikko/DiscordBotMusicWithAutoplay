@@ -1,29 +1,31 @@
 # Discord Music Bot 🎵
 
-Bot phát nhạc YouTube trong Discord với **Autoplay thông minh**.
+Bot phát nhạc YouTube trong Discord với **Autoplay thông minh** sử dụng YouTube Mix.
 
 ---
 
 ## ✨ Tính Năng
 
-- 🎵 Phát nhạc từ YouTube (URL hoặc search)
-- 🔄 **Autoplay thông minh** - Tự tìm bài tiếp theo dựa trên sở thích
-- 📋 Queue management (add, remove, shuffle, clear)
-- 🔁 Loop modes (track, queue, off)
-- 🎚️ Volume control
-- 📊 Now playing với progress bar
+- 🎵 **Phát nhạc** từ YouTube (URL, search, hoặc playlist)
+- 📋 **Playlist support** - Load toàn bộ playlist vào queue
+- 🔄 **Smart Autoplay** - Tự tìm bài tiếp theo bằng YouTube Mix
+- ⏭️ **Jump to track** - Nhảy đến bài bất kỳ trong queue
+- 🔁 **Loop modes** (track, queue, off)
+- 🎚️ **Volume control** (0-100%)
+- 📊 **Now playing** với progress bar
+- 👋 **Auto disconnect** - Rời khi idle hoặc không còn ai trong voice
+- 🚫 **Smart filtering** - Lọc shorts, live, quá dài, và hạn chế MV
 
 ---
 
 ## 📁 Cấu trúc Project
 
 ```
-ytb/
+discord-music-bot/
 ├── bot/                    # Source code
 │   ├── main.py             # Entry point
 │   ├── config.py           # Cấu hình tập trung
-│   ├── recommender.py      # AI gợi ý đơn giản
-│   ├── filters.py          # Filter shorts/live/mix
+│   ├── filters.py          # Filter tracks (shorts/live/MV)
 │   ├── utils.py            # Helper functions
 │   └── cogs/
 │       └── music.py        # Tất cả commands
@@ -48,8 +50,8 @@ ytb/
 
 ```bash
 # 1. Clone repo
-git clone https://github.com/your-username/discord-music-bot.git
-cd discord-music-bot
+git clone https://github.com/MonsieurNikko/DiscordBotMusicWithAutoplay.git
+cd DiscordBotMusicWithAutoplay
 
 # 2. Tạo file .env
 cp .env.example .env
@@ -61,28 +63,23 @@ pip install -r requirements.txt
 # 4. Download Lavalink.jar
 # Từ: https://github.com/lavalink-devs/Lavalink/releases
 # Đặt vào thư mục gốc
-
-# 5. Tạo thư mục plugins và download youtube-plugin
-mkdir plugins
-# Download từ: https://github.com/lavalink-devs/youtube-source/releases
-# Đặt file .jar vào thư mục plugins/
 ```
 
 ### Bước 2: Setup YouTube OAuth (QUAN TRỌNG!)
 
-YouTube yêu cầu OAuth để phát nhạc. Làm theo các bước:
+YouTube yêu cầu OAuth để phát nhạc:
 
 1. Chạy Lavalink:
    ```bash
    java -jar Lavalink.jar
    ```
 
-2. Xem logs, sẽ có dòng như:
+2. Xem logs, sẽ có dòng:
    ```
    OAUTH INTEGRATION: go to https://www.google.com/device and enter code XXX-XXX-XXXX
    ```
 
-3. Mở link, nhập code, đăng nhập bằng **tài khoản Google PHỤ** (không dùng tài khoản chính!)
+3. Mở link, nhập code, đăng nhập bằng **tài khoản Google PHỤ**
 
 4. Copy refresh token từ logs và thêm vào `lavalink/application.yml`:
    ```yaml
@@ -112,36 +109,53 @@ docker-compose up -d
 
 ## 🎮 Commands
 
+### Phát nhạc
 | Command | Mô tả |
 |---------|-------|
 | `pplay <url\|keywords>` | Phát hoặc thêm vào queue |
+| `pplay <playlist_url>` | Load **toàn bộ** playlist vào queue |
 | `pskip` | Skip bài hiện tại |
 | `ppause` / `presume` | Tạm dừng / Tiếp tục |
-| `pstop` | Dừng + xóa queue |
-| `pqueue` | Xem queue |
-| `premove <index>` | Xóa bài khỏi queue |
+| `pstop` | Dừng + xóa queue + rời voice |
+
+### Queue Management
+| Command | Mô tả |
+|---------|-------|
+| `pqueue` | Xem danh sách queue |
+| `pjump <số>` | Nhảy đến bài ở vị trí chỉ định |
+| `premove <số>` | Xóa bài khỏi queue |
 | `pclear` | Xóa toàn bộ queue |
-| `pshuffle` | Trộn queue |
-| `pnowplaying` | Bài đang phát + progress |
-| `ploop <off\|track\|queue>` | Lặp |
-| `pautoplay <on\|off>` | Bật/tắt autoplay |
-| `precommend [n]` | Xem n gợi ý |
-| `paddrec <index>` | Thêm gợi ý vào queue |
-| `pvolume [0-100]` | Âm lượng |
-| `psettings` | Xem cấu hình |
+| `pshuffle` | Trộn ngẫu nhiên queue |
+
+### Thông tin & Cài đặt
+| Command | Mô tả |
+|---------|-------|
+| `pnowplaying` | Bài đang phát + progress bar |
+| `ploop <off\|track\|queue>` | Chế độ lặp |
+| `pautoplay <on\|off>` | Bật/tắt autoplay (YouTube Mix) |
+| `pvolume [0-100]` | Điều chỉnh âm lượng |
+| `psettings` | Xem cấu hình hiện tại |
 | `pmusichelp` | Xem hướng dẫn |
 
-> 💡 Commands **case-insensitive**: `PPLAY`, `pPlAy`, `pplay` đều OK!
+> 💡 **Prefix:** `p` (ví dụ: `pplay`, `pskip`)
+> 
+> 💡 **Aliases:** `pj` = `pjump`, `ps` = `pskip`, `pq` = `pqueue`, `pnp` = `pnowplaying`
 
 ---
 
-## ⚙️ Cấu hình (.env)
+## 🔄 Autoplay (YouTube Mix)
 
-```bash
-# Copy template
-cp .env.example .env
-```
+Bot sử dụng **YouTube Radio Mix** để tìm bài tiếp theo:
+- Dựa trên thuật toán gợi ý của YouTube
+- Ưu tiên bài audio (hạn chế MV/Official Music Video)
+- Hiển thị bài tiếp theo khi ở bài cuối queue
+- Cả skip và kết thúc tự nhiên đều chuyển sang bài autoplay
 
+---
+
+## ⚙️ Cấu hình
+
+### .env
 | Biến | Mô tả | Bắt buộc |
 |------|-------|----------|
 | `DISCORD_TOKEN` | Token từ Discord Developer Portal | ✅ |
@@ -149,17 +163,22 @@ cp .env.example .env
 | `LAVALINK_PORT` | Port (default: 2333) | ❌ |
 | `LAVALINK_PASSWORD` | Password (default: youshallnotpass) | ❌ |
 
----
-
-## 🔧 Tùy chỉnh (config.py)
-
+### config.py
 | Setting | Default | Mô tả |
 |---------|---------|-------|
 | `MAX_DURATION_SECONDS` | 5400 (90 phút) | Video dài hơn sẽ bị chặn |
-| `IDLE_TIMEOUT_SECONDS` | 300 (5 phút) | Rời voice sau N giây idle |
-| `HISTORY_LIMIT` | 10 | Số bài để "học" gợi ý |
-| `ANTI_REPEAT_LIMIT` | 20 | Không lặp N bài gần nhất |
-| `BLOCKED_KEYWORDS` | shorts, mix, live... | Keywords bị chặn |
+| `IDLE_TIMEOUT_SECONDS` | 300 (5 phút) | Rời voice sau N giây không phát |
+| `ANTI_REPEAT_LIMIT` | 20 | Không lặp lại 20 bài gần nhất |
+| `BLOCKED_KEYWORDS` | shorts, compilation, live... | Keywords bị block hoàn toàn |
+| `MV_KEYWORDS` | mv, official music video... | Hạn chế trong autoplay |
+
+---
+
+## 👋 Auto Disconnect
+
+Bot tự động rời voice channel khi:
+- **Idle 5 phút**: Không phát nhạc trong 5 phút
+- **Không còn ai**: Rời sau 30 giây khi không còn ai trong voice (trừ bot)
 
 ---
 
@@ -176,10 +195,7 @@ docker-compose logs -f
 docker-compose down
 ```
 
-**Lưu ý Docker:**
-- Cần setup OAuth trước (xem Bước 2)
-- Thêm refresh token vào `lavalink/application.yml`
-- File này được mount vào container
+**Lưu ý:** Setup OAuth trước (Bước 2) và thêm refresh token vào `lavalink/application.yml`.
 
 ---
 
@@ -188,16 +204,16 @@ docker-compose down
 ### "loadFailed" / "Please sign in"
 - YouTube yêu cầu OAuth → Xem Bước 2
 
-### "No results found"
+### "Không tìm thấy kết quả"
 - Kiểm tra OAuth đã setup đúng
-- Thử search bằng URL thay vì keywords
+- Thử dùng URL thay vì keywords
 
 ### Bot không join voice
 - Kiểm tra bot có quyền Connect + Speak
 
 ### Lavalink không start
 - Cần Java 17+ (`java --version`)
-- Kiểm tra port 2333 không bị chiếm
+- Port 2333 không bị chiếm
 
 ---
 

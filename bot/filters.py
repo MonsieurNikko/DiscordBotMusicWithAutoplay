@@ -1,7 +1,19 @@
 """
 Track Filter - Validates tracks against configured rules
 """
-from bot.config import MAX_DURATION_SECONDS, BLOCKED_KEYWORDS
+from bot.config import MAX_DURATION_SECONDS, BLOCKED_KEYWORDS, MV_KEYWORDS
+
+
+def is_likely_mv(title: str) -> bool:
+    """
+    Kiểm tra title có chứa từ khóa MV/Official Music Video không.
+    Dùng để hạn chế (không block) trong autoplay.
+    """
+    title_lower = title.lower()
+    for keyword in MV_KEYWORDS:
+        if keyword in title_lower:
+            return True
+    return False
 
 
 def is_valid_track(title: str, duration_ms: int, is_stream: bool) -> tuple[bool, str]:
