@@ -182,6 +182,11 @@ class Music(commands.Cog):
                 
                 for track in results[1:]:  # Bỏ bài đầu (bài hiện tại)
                     if track.identifier not in recent_ids:
+                        # Kiểm tra tên giống bài hiện tại → bỏ qua
+                        if self._is_similar_title(current_title, track.title):
+                            logger.debug(f"[AUTOPLAY] Skip bài tên giống: '{track.title}'")
+                            continue
+                        
                         # Kiểm tra filter (shorts, live, quá dài)
                         is_valid, _ = is_valid_track(
                             title=track.title,
@@ -291,6 +296,10 @@ class Music(commands.Cog):
                 
                 for track in results[1:]:
                     if track.identifier not in recent_ids:
+                        # Kiểm tra tên giống bài hiện tại → bỏ qua
+                        if self._is_similar_title(current_track.title, track.title):
+                            continue
+                        
                         is_valid, _ = is_valid_track(
                             title=track.title,
                             duration_ms=track.length,
@@ -365,6 +374,54 @@ class Music(commands.Cog):
         # Giữ tối đa 20 bài gần nhất
         if len(self._recent_ids[guild_id]) > 20:
             self._recent_ids[guild_id].pop(0)
+    
+    def _is_similar_title(self, title1: str, title2: str) -> bool:
+        """
+        Kiểm tra 2 tên bài có giống nhau/quá tương tự không.
+        Trả về True nếu giống → cần bỏ qua.
+        """
+        import re
+        
+        def clean_title(title: str) -> str:
+            """Loại bỏ ký tự đặc biệt và chuẩn hóa."""
+            # Loại bỏ phần trong ngoặc và dấu đặc biệt
+            title = re.sub(r'\([^)]*\)', '', title)  # (official mv), (lyrics)
+            title = re.sub(r'\[[^\]]*\]', '', title)  # [official video]
+            title = re.sub(r'[^\w\s]', '', title)  # Dấu đặc biệt
+            title = title.lower().strip()
+            # Loại bỏ các từ phổ biến
+            common_words = ['official', 'mv', 'music', 'video', 'audio', 'lyric', 'lyrics', 
+                           'hd', '4k', 'visualizer', 'vietsub', 'engsub']
+            words = title.split()
+            words = [w for w in words if w not in common_words]
+            return ' '.join(words)
+        
+        clean1 = clean_title(title1)
+        clean2 = clean_title(title2)
+        
+        # Nếu một trong hai rỗng sau khi clean, không xét
+        if not clean1 or not clean2:
+            return False
+        
+        # Nếu giống hệt
+        if clean1 == clean2:
+            return True
+        
+        # Nếu một cái chứa cái kia (tên ngắn hơn nằm trong tên dài)
+        if len(clean1) > 3 and len(clean2) > 3:
+            if clean1 in clean2 or clean2 in clean1:
+                return True
+        
+        # Tính độ giống nhau dựa trên từ chung
+        words1 = set(clean1.split())
+        words2 = set(clean2.split())
+        if len(words1) >= 2 and len(words2) >= 2:
+            common = words1 & words2
+            similarity = len(common) / min(len(words1), len(words2))
+            if similarity >= 0.7:  # 70% từ giống nhau → coi như trùng
+                return True
+        
+        return False
     
     def _start_idle_timer(self, player: wavelink.Player):
         """Start idle disconnect timer."""
@@ -534,6 +591,11 @@ class Music(commands.Cog):
                 
                 # Add to queue or play
                 if player.playing:
+                    # Xóa prefetch autoplay nếu có (vì user đã add bài mới)
+                    if ctx.guild and ctx.guild.id in self._next_autoplay:
+                        del self._next_autoplay[ctx.guild.id]
+                        logger.info(f"[PLAY] Guild {ctx.guild.id}: Xóa prefetch autoplay vì user add bài mới")
+                    
                     player.queue.put(track)
                     position = len(player.queue)
                     embed = discord.Embed(
