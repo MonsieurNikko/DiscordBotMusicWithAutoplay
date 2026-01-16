@@ -408,9 +408,15 @@ class Music(commands.Cog):
             title = re.sub(r'\[[^\]]*\]', '', title)  # [official video]
             title = re.sub(r'[^\w\s]', '', title)  # Dấu đặc biệt
             title = title.lower().strip()
-            # Loại bỏ các từ phổ biến
-            common_words = ['official', 'mv', 'music', 'video', 'audio', 'lyric', 'lyrics', 
-                           'hd', '4k', 'visualizer', 'vietsub', 'engsub']
+            # Loại bỏ các từ phổ biến (bao gồm remix, cover, etc)
+            common_words = [
+                'official', 'mv', 'music', 'video', 'audio', 'lyric', 'lyrics', 
+                'hd', '4k', 'visualizer', 'vietsub', 'engsub',
+                'remix', 'cover', 'karaoke', 'instrumental', 'acoustic',
+                'live', 'version', 'ver', 'edit', 'extended', 'radio',
+                'nightcore', 'slowed', 'reverb', 'bass', 'boosted',
+                'pt', 'dj', 'ft', 'feat', 'prod'
+            ]
             words = title.split()
             words = [w for w in words if w not in common_words]
             return ' '.join(words)
