@@ -182,11 +182,6 @@ class Music(commands.Cog):
                 
                 for track in results[1:]:  # Bỏ bài đầu (bài hiện tại)
                     if track.identifier not in recent_ids:
-                        # Kiểm tra tên giống bài hiện tại → bỏ qua
-                        if self._is_similar_title(current_title, track.title):
-                            logger.debug(f"[AUTOPLAY] Skip bài tên giống: '{track.title}'")
-                            continue
-                        
                         # Kiểm tra filter (shorts, live, quá dài)
                         is_valid, _ = is_valid_track(
                             title=track.title,
@@ -245,13 +240,43 @@ class Music(commands.Cog):
         except Exception as e:
             logger.warning(f"[AUTOPLAY] Guild {guild_id}: YouTube Mix thất bại: {e}")
         
-        # Fallback: Tìm kiếm thông thường
+        # Fallback: Tìm kiếm thông thường với scoring
         logger.info(f"[AUTOPLAY] Guild {guild_id}: Fallback sang search...")
         
-        fallback_queries = [
-            f"{current_title} similar songs",
-            f"{player.current.author} music" if player.current.author else None,
-        ]
+        # Lấy thông tin genre/language của bài hiện tại
+        source_info = self._detect_genre_language(
+            current_title, 
+            player.current.author if player.current else ""
+        )
+        
+        # Xác định ngôn ngữ chính để tìm kiếm
+        is_vietnamese = 'vi' in source_info.get('languages', set())
+        is_kpop = 'kpop' in source_info.get('genres', set())
+        is_japanese = 'ja' in source_info.get('languages', set())
+        
+        # Tạo query phù hợp với ngôn ngữ
+        if is_vietnamese:
+            fallback_queries = [
+                f"{player.current.author} nhạc" if player.current and player.current.author else None,
+                "nhạc việt hot 2024",
+                f"{current_title.split()[0]} nhạc",  # Dùng từ đầu tiên
+            ]
+        elif is_kpop:
+            fallback_queries = [
+                f"{player.current.author} kpop" if player.current and player.current.author else None,
+                "kpop hot 2024",
+            ]
+        elif is_japanese:
+            fallback_queries = [
+                f"{player.current.author}" if player.current and player.current.author else None,
+                "jpop music",
+            ]
+        else:
+            fallback_queries = [
+                f"{player.current.author} music" if player.current and player.current.author else None,
+                f"{current_title} similar songs",
+            ]
+        
         fallback_queries = [q for q in fallback_queries if q]
         
         for query in fallback_queries:
@@ -262,11 +287,25 @@ class Music(commands.Cog):
                 
                 # Lọc kết quả
                 valid = filter_search_results(results[:10], recent_ids)
+                
                 if valid:
-                    chosen = random.choice(valid[:3])
+                    # Áp dụng scoring
+                    scored_tracks = []
+                    for track in valid:
+                        score = self._calculate_similarity_score(source_info, track.title, track.author)
+                        scored_tracks.append((track, score))
+                    
+                    # Sắp xếp theo điểm giảm dần
+                    scored_tracks.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # Chọn từ top 3 bài điểm cao nhất
+                    top_tracks = [t[0] for t in scored_tracks[:3]]
+                    chosen = random.choice(top_tracks) if top_tracks else valid[0]
+                    
+                    chosen_score = next((s for t, s in scored_tracks if t == chosen), 0)
                     self._add_recent_id(guild_id, chosen.identifier)
                     
-                    logger.info(f"[AUTOPLAY] Guild {guild_id}: Đã chọn từ search: '{chosen.title}'")
+                    logger.info(f"[AUTOPLAY] Guild {guild_id}: Đã chọn từ search: '{chosen.title}' (score={chosen_score})")
                     await player.play(chosen)
                     
                     if hasattr(player, 'text_channel') and player.text_channel:
@@ -315,10 +354,6 @@ class Music(commands.Cog):
                 
                 for track in results[1:]:
                     if track.identifier not in recent_ids:
-                        # Kiểm tra tên giống bài hiện tại → bỏ qua
-                        if self._is_similar_title(current_track.title, track.title):
-                            continue
-                        
                         is_valid, _ = is_valid_track(
                             title=track.title,
                             duration_ms=track.length,
@@ -355,16 +390,37 @@ class Music(commands.Cog):
                         await player.text_channel.send(embed=embed)
                     return
             
-            # Fallback: search
-            query = f"{current_track.title} similar songs"
+            # Fallback: search với scoring
+            source_info = self._detect_genre_language(
+                current_track.title, 
+                current_track.author if current_track else ""
+            )
+            
+            # Xác định ngôn ngữ để tạo query phù hợp
+            is_vietnamese = 'vi' in source_info.get('languages', set())
+            if is_vietnamese:
+                query = f"{current_track.author} nhạc" if current_track.author else "nhạc việt hot"
+            else:
+                query = f"{current_track.author} music" if current_track.author else f"{current_track.title} similar"
+            
             results = await wavelink.Playable.search(f"ytsearch:{query}")
             if results:
                 valid = filter_search_results(results[:10], recent_ids)
                 if valid:
-                    chosen = random.choice(valid[:3])
+                    # Áp dụng scoring
+                    scored_tracks = []
+                    for track in valid:
+                        score = self._calculate_similarity_score(source_info, track.title, track.author)
+                        scored_tracks.append((track, score))
+                    
+                    scored_tracks.sort(key=lambda x: x[1], reverse=True)
+                    top_tracks = [t[0] for t in scored_tracks[:3]]
+                    chosen = random.choice(top_tracks) if top_tracks else valid[0]
+                    
                     self._next_autoplay[guild_id] = chosen
                     
-                    logger.info(f"[PREFETCH] Guild {guild_id}: Đã prefetch (search): '{chosen.title}'")
+                    chosen_score = next((s for t, s in scored_tracks if t == chosen), 0)
+                    logger.info(f"[PREFETCH] Guild {guild_id}: Đã prefetch (search): '{chosen.title}' (score={chosen_score})")
                     
                     if hasattr(player, 'text_channel') and player.text_channel:
                         embed = discord.Embed(
